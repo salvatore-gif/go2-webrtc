@@ -15,13 +15,26 @@ export class Go2WebRTC {
 
     this.msgCallbacks = new Map();
     this.validationResult = "PENDING";
+    this._channelOpen = false;
     this.pc = new RTCPeerConnection({ sdpSemantics: "unified-plan" });
     this.channel = this.pc.createDataChannel("data");
 
     this.pc.addTransceiver("video", { direction: "recvonly" });
     this.pc.addTransceiver("audio", { direction: "sendrecv" });
     this.pc.addEventListener("track", this.trackEventHandler.bind(this));
+    this.pc.addEventListener("connectionstatechange", () => {
+      logMessage(`Peer state: ${this.pc.connectionState}`);
+    });
     this.channel.onmessage = this.messageEventHandler.bind(this);
+    this.channel.onopen = () => {
+      this._channelOpen = true;
+      logMessage("Data channel opened");
+    };
+    this.channel.onclose = () => {
+      this._channelOpen = false;
+      logMessage("Data channel closed");
+    };
+    this.channel.onerror = (e) => logMessage(`Data channel error: ${e.type}`);
 
     this.heartbeatTimer = null;
   }
@@ -29,8 +42,27 @@ export class Go2WebRTC {
   trackEventHandler(event) {
     if (event.track.kind === "video") {
       this.VidTrackEvent = event;
+      this.attachVideoStream();
     } else {
       this.AudTrackEvent = event;
+    }
+  }
+
+  attachVideoStream() {
+    const videoElement = document.getElementById("video-frame");
+    if (!videoElement || !this.VidTrackEvent || !this.VidTrackEvent.streams.length) {
+      return;
+    }
+
+    videoElement.autoplay = true;
+    videoElement.muted = true;
+    videoElement.playsInline = true;
+    videoElement.srcObject = this.VidTrackEvent.streams[0];
+    const playPromise = videoElement.play();
+    if (playPromise && typeof playPromise.catch === "function") {
+      playPromise.catch((error) => {
+        logMessage(`Video playback blocked: ${error}`);
+      });
     }
   }
 
@@ -46,10 +78,16 @@ export class Go2WebRTC {
   }
 
   handleDataChannelMessage(event) {
-    const data =
-      typeof event.data == "string"
-        ? JSON.parse(event.data)
-        : this.dealArrayBuffer(event.data);
+    let data;
+    try {
+      data =
+        typeof event.data == "string"
+          ? JSON.parse(event.data)
+          : this.dealArrayBuffer(event.data);
+    } catch (error) {
+      logMessage(`Failed to parse data channel message: ${error}`);
+      return;
+    }
     if (data.type === DataChannelType.VALIDATION) {
       this.rtcValidation(data);
     }
@@ -100,9 +138,15 @@ export class Go2WebRTC {
       body: JSON.stringify(answer),
     };
 
-    fetch(`http://${window.location.hostname}:8081/offer`, options)
+    fetch("/offer", options)
       .then((response) => {
-        console.log(`statusCode: ${response.status}`);
+        if (!response.ok) {
+          return response
+            .text()
+            .then((text) => {
+              throw new Error(`signaling ${response.status}: ${text}`);
+            });
+        }
         return response.json();
       })
       .then((data) => {
@@ -115,11 +159,12 @@ export class Go2WebRTC {
             this.startHeartbeat();
           })
           .catch((e) => {
-            console.log(e);
+            logMessage(`Remote SDP error: ${e}`);
           });
       })
       .catch((error) => {
         console.error("Error sending message:", error);
+        logMessage(`Signaling error: ${error}`);
       });
   }
 
@@ -150,12 +195,14 @@ export class Go2WebRTC {
 
       // TODO this should be on the callback for video on message
       if (document.getElementById("video-frame")) {
-        logMessage("Playing video");
-        logMessage("Sending video on message");
-        this.publish("", "on", DataChannelType.VID);
-
-        document.getElementById("video-frame").srcObject =
-          this.VidTrackEvent.streams[0];
+        logMessage("Requesting video stream");
+        this.publish("", "on", DataChannelType.VID).catch((error) => {
+          logMessage(`Failed to enable video stream: ${error}`);
+        });
+        if (!this.VidTrackEvent) {
+          logMessage("Waiting for video track...");
+        }
+        this.attachVideoStream();
       }
     } else {
       logMessage(`Sending validation key ${msg.data}`);
@@ -214,6 +261,10 @@ export class Go2WebRTC {
   }
 
   publishApi(topic, api_id, data) {
+    if (!this.channel || this.channel.readyState !== "open") {
+      return;
+    }
+
     const uniqID =
       (new Date().valueOf() % 2147483648) + Math.floor(Math.random() * 1e3);
 

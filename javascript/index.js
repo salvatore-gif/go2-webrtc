@@ -1,5 +1,10 @@
 import { Go2WebRTC } from "./go2webrtc.js";
 
+const STORAGE_KEYS = {
+  token: "go2_token",
+  robotIP: "go2_robot_ip",
+};
+
 // Function to log messages to the console and the log window
 function logMessage(text) {
   var log = document.querySelector("#log");
@@ -9,10 +14,18 @@ function logMessage(text) {
 }
 globalThis.logMessage = logMessage;
 
+window.addEventListener("error", (event) => {
+  logMessage(`JS error: ${event.message}`);
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  logMessage(`Unhandled promise rejection: ${event.reason}`);
+});
+
 // Function to load saved values from localStorage
 function loadSavedValues() {
-  const savedToken = localStorage.getItem("token");
-  const savedRobotIP = localStorage.getItem("robotIP");
+  const savedToken = localStorage.getItem(STORAGE_KEYS.token);
+  const savedRobotIP = localStorage.getItem(STORAGE_KEYS.robotIP);
 
   if (savedToken) {
     document.getElementById("token").value = savedToken;
@@ -20,6 +33,37 @@ function loadSavedValues() {
   if (savedRobotIP) {
     document.getElementById("robot-ip").value = savedRobotIP;
   }
+
+  fetch("/defaults")
+    .then((response) => {
+      if (!response.ok) {
+        return null;
+      }
+      return response.json();
+    })
+    .then((defaults) => {
+      if (!defaults) {
+        return;
+      }
+
+      if (!savedToken && defaults.token) {
+        document.getElementById("token").value = defaults.token;
+      }
+      // Prefer server-side defaults so stale browser storage cannot lock
+      // the app to an outdated robot IP from a previous network.
+      if (defaults.robot_ip) {
+        if (savedRobotIP && savedRobotIP !== defaults.robot_ip) {
+          logMessage(
+            `Using configured robot IP ${defaults.robot_ip} instead of saved ${savedRobotIP}`
+          );
+        }
+        document.getElementById("robot-ip").value = defaults.robot_ip;
+        localStorage.setItem(STORAGE_KEYS.robotIP, defaults.robot_ip);
+      }
+    })
+    .catch((error) => {
+      logMessage(`Defaults load error: ${error}`);
+    });
 
   const commandSelect = document.getElementById("command");
   Object.entries(SPORT_CMD).forEach(([value, text]) => {
@@ -35,8 +79,8 @@ function saveValuesToLocalStorage() {
   const token = document.getElementById("token").value;
   const robotIP = document.getElementById("robot-ip").value;
 
-  localStorage.setItem("token", token);
-  localStorage.setItem("robotIP", robotIP);
+  localStorage.setItem(STORAGE_KEYS.token, token);
+  localStorage.setItem(STORAGE_KEYS.robotIP, robotIP);
 }
 
 // Function to handle connect button click
@@ -45,6 +89,11 @@ function handleConnectClick() {
   // For now, let's just log the values
   const token = document.getElementById("token").value;
   const robotIP = document.getElementById("robot-ip").value;
+
+  if (!robotIP) {
+    logMessage("Robot IP is required");
+    return;
+  }
 
   console.log("Token:", token);
   console.log("Robot IP:", robotIP);
@@ -59,6 +108,11 @@ function handleConnectClick() {
 }
 
 function handleExecuteClick() {
+  if (!globalThis.rtc || !globalThis.rtc.channel || globalThis.rtc.channel.readyState !== "open") {
+    logMessage("Data channel not open yet");
+    return;
+  }
+
   const uniqID =
     (new Date().valueOf() % 2147483648) + Math.floor(Math.random() * 1e3);
   const command = parseInt(document.getElementById("command").value);
@@ -74,6 +128,11 @@ function handleExecuteClick() {
 
 
 function handleExecuteCustomClick() {
+    if (!globalThis.rtc || !globalThis.rtc.channel || globalThis.rtc.channel.readyState !== "open") {
+      logMessage("Data channel not open yet");
+      return;
+    }
+
     const command = document.getElementById("custom-command").value;
   
     console.log("Command:", command);
@@ -98,7 +157,7 @@ function applyGamePadDeadzeone(value, th) {
 }
 
 function joystickTick(joyLeft, joyRight) {
-  let x,y,z = 0;
+  let x = 0, y = 0, z = 0;
   let gpToUse = document.getElementById("gamepad").value;
   if (gpToUse !== "NO") {
     const gamepads = navigator.getGamepads();
@@ -126,7 +185,7 @@ function joystickTick(joyLeft, joyRight) {
 
   console.log("Joystick Linear:", x, y, z);
 
-  if(globalThis.rtc == undefined) return;
+  if(globalThis.rtc == undefined || !globalThis.rtc.channel || globalThis.rtc.channel.readyState !== "open") return;
   globalThis.rtc.publishApi("rt/api/sport/request", 1008, JSON.stringify({x: x, y: y, z: z}));
 }
 
@@ -145,7 +204,8 @@ function addJoysticks() {
 }
 
 const buildGamePadsSelect = (e) => {
-  const gp = navigator.getGamepads().filter(x => x != null && x.id.toLowerCase().indexOf("xbox") != -1);
+  const gamepads = navigator.getGamepads ? Array.from(navigator.getGamepads() || []) : [];
+  const gp = gamepads.filter((x) => x != null && x.id && x.id.toLowerCase().indexOf("xbox") != -1);
 
   const gamepadSelect = document.getElementById("gamepad");
   gamepadSelect.innerHTML = "";
@@ -220,7 +280,7 @@ document
             return; // Ignore other keys
     }
 
-    if(globalThis.rtc !== undefined) {
+    if(globalThis.rtc !== undefined && globalThis.rtc.channel && globalThis.rtc.channel.readyState === "open") {
         globalThis.rtc.publishApi("rt/api/sport/request", 1008, JSON.stringify({x: x, y: y, z: z}));
     }
 });
@@ -228,7 +288,7 @@ document
 document.addEventListener('keyup', function(event) {
     const key = event.key.toLowerCase();
     if (key === 'w' || key === 's' || key === 'a' || key === 'd' || key === 'q' || key === 'e') {
-        if(globalThis.rtc !== undefined) {
+        if(globalThis.rtc !== undefined && globalThis.rtc.channel && globalThis.rtc.channel.readyState === "open") {
             // Stop movement by sending zero velocity
             globalThis.rtc.publishApi("rt/api/sport/request", 1008, JSON.stringify({x: 0, y: 0, z: 0}));
         }
